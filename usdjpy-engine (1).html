@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>USD/JPY Engine</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0a0a0a; color: #e5e5e5; min-height: 100vh; padding: 24px; font-family: system-ui, -apple-system, sans-serif; }
+  .container { max-width: 880px; margin: 0 auto; }
+  .header-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 20px; font-weight: 500; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { font-size: 12px; color: #737373; margin: 4px 0 0; }
+  .mode-toggle { display: inline-flex; background: #171717; border-radius: 8px; padding: 3px; gap: 2px; }
+  .mode-btn { background: transparent; border: none; color: #a3a3a3; padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer; font-family: inherit; display: flex; align-items: center; gap: 6px; }
+  .mode-btn.active { background: #262626; color: #e5e5e5; }
+  .mode-btn .dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; display: none; animation: pulse 2s infinite; }
+  .mode-btn.active.live-btn .dot { display: inline-block; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .status-line { font-size: 11px; color: #737373; margin-top: 4px; text-align: right; }
+  .status-line.stale { color: #f59e0b; }
+  .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+  .stat { background: #171717; border-radius: 8px; padding: 10px 14px; }
+  .stat-label { font-size: 11px; color: #737373; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-value { font-size: 24px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.2; margin-top: 2px; }
+  .stat-sub { font-size: 11px; color: #737373; font-variant-numeric: tabular-nums; }
+  .chart-box { background: #171717; border-radius: 12px; padding: 12px; margin-bottom: 12px; position: relative; }
+  .chart-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 12px; }
+  .regime-label { color: #a3a3a3; }
+  .regime-pill { padding: 2px 10px; border-radius: 999px; font-size: 11px; font-weight: 500; }
+  .chart-wrap { position: relative; }
+  svg { display: block; width: 100%; }
+  .tension-bar { position: absolute; right: -20px; top: 8px; bottom: 8px; width: 6px; background: #262626; border-radius: 3px; overflow: hidden; }
+  .tension-fill { position: absolute; left: 0; right: 0; transition: height 0.4s, background 0.4s; }
+  .legend { display: flex; gap: 16px; font-size: 10px; color: #737373; margin-top: 8px; padding-left: 4px; }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+  .legend-line { display: inline-block; width: 14px; }
+  .sliders { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 20px; margin-bottom: 12px; }
+  .slider { font-size: 12px; }
+  .slider-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; gap: 8px; }
+  .slider-name { font-weight: 500; color: #e5e5e5; display: flex; align-items: center; gap: 6px; }
+  .lock-btn { background: transparent; border: none; color: #737373; cursor: pointer; padding: 0; font-size: 11px; display: none; }
+  .lock-btn:hover { color: #e5e5e5; }
+  body.live-mode .lock-btn { display: inline-block; }
+  .lock-btn.unlocked { color: #f59e0b; }
+  .slider-val { font-variant-numeric: tabular-nums; color: #a3a3a3; font-size: 11px; }
+  .slider-hint { font-size: 10px; color: #737373; margin-top: 2px; line-height: 1.3; }
+  input[type=range] { width: 100%; accent-color: #3b82f6; }
+  input[type=range]:disabled { opacity: 0.5; cursor: not-allowed; }
+  .override-tag { font-size: 9px; background: #78350f; color: #fcd34d; padding: 1px 6px; border-radius: 999px; margin-left: 4px; }
+  .events { display: flex; gap: 6px; flex-wrap: wrap; }
+  .evt { font-size: 12px; padding: 6px 12px; border-radius: 8px; border: 0.5px solid #404040; background: transparent; color: #e5e5e5; cursor: pointer; transition: all 0.15s; font-family: inherit; }
+  .evt:hover:not(:disabled) { background: #262626; }
+  .evt:active { transform: scale(0.97); }
+  .evt:disabled { opacity: 0.3; cursor: not-allowed; }
+  .config-section { background: #171717; border-radius: 8px; padding: 14px; margin-top: 16px; }
+  .config-title { font-size: 11px; color: #737373; text-transform: uppercase; letter-spacing: 0.5px; margin: 0; }
+  .config-row { display: flex; gap: 8px; margin-bottom: 6px; align-items: center; margin-top: 10px; }
+  .config-row label { font-size: 11px; color: #a3a3a3; min-width: 100px; }
+  .config-row input { flex: 1; background: #0a0a0a; border: 0.5px solid #404040; color: #e5e5e5; padding: 6px 10px; border-radius: 6px; font-family: inherit; font-size: 11px; }
+  .config-save { background: #3b82f6; color: white; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 11px; margin-top: 6px; }
+  .config-status { font-size: 10px; color: #22c55e; margin-top: 6px; min-height: 12px; }
+  .config-toggle { background: transparent; border: 0.5px solid #404040; color: #737373; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header-row">
+    <div>
+      <h1>USD/JPY engine</h1>
+      <p class="subtitle" id="mode-subtitle">Simulation mode — sliders drive the math</p>
+    </div>
+    <div style="text-align: right;">
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="sim-btn">Simulation</button>
+        <button class="mode-btn live-btn" id="live-btn"><span class="dot"></span>Live</button>
+      </div>
+      <div class="status-line" id="status-line"></div>
+    </div>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat"><div class="stat-label">Spot</div><div class="stat-value" id="spot">150.00</div><div class="stat-sub" id="spot-sub">tick: +0.00</div></div>
+    <div class="stat"><div class="stat-label">Fair value</div><div class="stat-value" id="fv">150.00</div><div class="stat-sub" id="fv-sub">diff: 0.00%</div></div>
+    <div class="stat"><div class="stat-label">Divergence</div><div class="stat-value" id="div">0.00</div><div class="stat-sub" id="div-sub">at equilibrium</div></div>
+  </div>
+
+  <div class="chart-box">
+    <div class="chart-header">
+      <span class="regime-label" id="regime-label">Regime: neutral grind</span>
+      <span class="regime-pill" id="regime-pill" style="background:#1e3a8a;color:#93c5fd">stable</span>
+    </div>
+    <div class="chart-wrap">
+      <svg viewBox="0 0 800 280" preserveAspectRatio="none">
+        <line x1="0" y1="140" x2="800" y2="140" stroke="#404040" stroke-width="0.5" stroke-dasharray="2 4"/>
+        <polyline id="fv-line" fill="none" stroke="#737373" stroke-width="1" stroke-dasharray="4 4" opacity="0.85"/>
+        <polyline id="px-line" fill="none" stroke="#3b82f6" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>
+        <circle id="px-dot" cx="800" cy="140" r="3.5" fill="#3b82f6"/>
+      </svg>
+      <div class="tension-bar"><div class="tension-fill" id="tension-fill" style="height:0;background:#3b82f6;bottom:50%"></div></div>
+    </div>
+    <div class="legend">
+      <span><span class="legend-line" id="leg-px" style="height:2px;background:#3b82f6"></span> spot</span>
+      <span><span class="legend-line" style="border-top:1px dashed #737373"></span> fair value</span>
+    </div>
+  </div>
+
+  <div class="sliders">
+    <div class="slider">
+      <div class="slider-head">
+        <span class="slider-name">US 2Y yield <button class="lock-btn" data-key="us2y">🔒</button></span>
+        <span class="slider-val" id="us2y-val">4.50%</span>
+      </div>
+      <input type="range" id="us2y" min="2" max="6" step="0.05" value="4.5">
+      <div class="slider-hint">Fed rate path. Higher = stronger USD pull.</div>
+    </div>
+    <div class="slider">
+      <div class="slider-head">
+        <span class="slider-name">JGB 2Y yield <button class="lock-btn" data-key="jgb2y">🔒</button></span>
+        <span class="slider-val" id="jgb2y-val">0.80%</span>
+      </div>
+      <input type="range" id="jgb2y" min="-0.5" max="3" step="0.05" value="0.8">
+      <div class="slider-hint">BoJ path. Higher = stronger yen pull.</div>
+    </div>
+    <div class="slider">
+      <div class="slider-head">
+        <span class="slider-name">VIX (equity vol) <button class="lock-btn" data-key="vix">🔒</button></span>
+        <span class="slider-val" id="vix-val">14</span>
+      </div>
+      <input type="range" id="vix" min="9" max="50" step="1" value="14">
+      <div class="slider-hint">Risk-off amplifier. High VIX = carry unwind.</div>
+    </div>
+    <div class="slider">
+      <div class="slider-head">
+        <span class="slider-name">Positioning (short JPY) <button class="lock-btn" data-key="pos">🔒</button></span>
+        <span class="slider-val" id="pos-val">moderate</span>
+      </div>
+      <input type="range" id="pos" min="0" max="100" step="1" value="50">
+      <div class="slider-hint">CFTC COT. Crowded = bigger snap risk.</div>
+    </div>
+    <div class="slider">
+      <div class="slider-head">
+        <span class="slider-name">Crude oil <button class="lock-btn" data-key="oil">🔒</button></span>
+        <span class="slider-val" id="oil-val">$78</span>
+      </div>
+      <input type="range" id="oil" min="40" max="140" step="1" value="78">
+      <div class="slider-hint">Japan trade gap. High oil = USD/JPY drift up.</div>
+    </div>
+    <div class="slider">
+      <div class="slider-head">
+        <span class="slider-name">Tokyo fix pulse</span>
+        <span class="slider-val" id="fix-val">on</span>
+      </div>
+      <input type="range" id="fix" min="0" max="1" step="1" value="1">
+      <div class="slider-hint">Daily 9:55 JST exporter yen-buying.</div>
+    </div>
+  </div>
+
+  <div class="events">
+    <button class="evt" onclick="shock('hot_cpi')">Hot US CPI</button>
+    <button class="evt" onclick="shock('boj_hike')">BoJ surprise hike</button>
+    <button class="evt" onclick="shock('mof')">MoF intervention</button>
+    <button class="evt" onclick="shock('risk_off')">Risk-off crash</button>
+    <button class="evt" onclick="shock('dovish_fed')">Dovish Fed</button>
+    <button class="evt" onclick="reset()">Reset</button>
+  </div>
+
+  <div class="config-section">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <h3 class="config-title">Supabase connection (Live mode)</h3>
+      <button class="config-toggle" onclick="toggleConfig()">show/hide</button>
+    </div>
+    <div id="config-body" style="display: none;">
+      <div class="config-row">
+        <label>Project URL</label>
+        <input id="supa-url" placeholder="https://xxxxx.supabase.co" />
+      </div>
+      <div class="config-row">
+        <label>anon key</label>
+        <input id="supa-key" placeholder="eyJ..." type="password" />
+      </div>
+      <button class="config-save" onclick="saveSupabaseConfig()">Save & test connection</button>
+      <div class="config-status" id="config-status"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const N = 200, W = 800, H = 280, PAD = 16;
+let px = 150;
+const pxHist = new Array(N).fill(150);
+const fvHist = new Array(N).fill(150);
+let tick = 0, shockImpulse = 0, shockBias = 0;
+
+const $ = id => document.getElementById(id);
+const inputs = { us2y: $('us2y'), jgb2y: $('jgb2y'), vix: $('vix'), pos: $('pos'), oil: $('oil'), fix: $('fix') };
+
+let mode = 'sim';
+let livePollTimer = null;
+let lastLiveUpdate = null;
+const overrides = { us2y: false, jgb2y: false, vix: false, pos: false, oil: false };
+
+function setMode(newMode) {
+  mode = newMode;
+  $('sim-btn').classList.toggle('active', mode === 'sim');
+  $('live-btn').classList.toggle('active', mode === 'live');
+  document.body.classList.toggle('live-mode', mode === 'live');
+  $('mode-subtitle').textContent = mode === 'sim'
+    ? 'Simulation mode — sliders drive the math'
+    : 'Live mode — real values from Supabase, override individual sliders to test "what if"';
+  Object.keys(inputs).forEach(k => {
+    if (k === 'fix') return;
+    if (mode === 'live') inputs[k].disabled = !overrides[k];
+    else inputs[k].disabled = false;
+  });
+  document.querySelectorAll('.evt').forEach(b => {
+    if (b.textContent === 'Reset') return;
+    b.disabled = mode === 'live';
+  });
+  if (mode === 'live') startLivePolling();
+  else stopLivePolling();
+  updateStatusLine();
+}
+
+$('sim-btn').onclick = () => setMode('sim');
+$('live-btn').onclick = () => setMode('live');
+
+document.querySelectorAll('.lock-btn').forEach(btn => {
+  btn.onclick = (e) => {
+    e.preventDefault();
+    const key = btn.dataset.key;
+    overrides[key] = !overrides[key];
+    btn.textContent = overrides[key] ? '🔓' : '🔒';
+    btn.classList.toggle('unlocked', overrides[key]);
+    const head = btn.closest('.slider-head').querySelector('.slider-name');
+    let tag = head.querySelector('.override-tag');
+    if (overrides[key] && !tag) {
+      tag = document.createElement('span');
+      tag.className = 'override-tag';
+      tag.textContent = 'OVERRIDE';
+      head.appendChild(tag);
+    } else if (!overrides[key] && tag) {
+      tag.remove();
+    }
+    if (mode === 'live') inputs[key].disabled = !overrides[key];
+  };
+});
+
+function toggleConfig() {
+  const body = $('config-body');
+  body.style.display = body.style.display === 'none' ? 'block' : 'none';
+}
+
+function saveSupabaseConfig() {
+  const url = $('supa-url').value.trim();
+  const key = $('supa-key').value.trim();
+  if (!url || !key) { $('config-status').textContent = 'Both fields required'; $('config-status').style.color = '#ef4444'; return; }
+  localStorage.setItem('supa_url', url);
+  localStorage.setItem('supa_key', key);
+  $('config-status').textContent = 'Saved. Testing connection...';
+  $('config-status').style.color = '#a3a3a3';
+  fetchLiveSnapshot().then(data => {
+    if (data) {
+      $('config-status').textContent = 'Connected. Latest snapshot loaded.';
+      $('config-status').style.color = '#22c55e';
+    } else {
+      $('config-status').textContent = 'Connection failed. Check URL and key.';
+      $('config-status').style.color = '#ef4444';
+    }
+  });
+}
+
+if (localStorage.getItem('supa_url')) $('supa-url').value = localStorage.getItem('supa_url');
+if (localStorage.getItem('supa_key')) $('supa-key').value = localStorage.getItem('supa_key');
+
+async function fetchLiveSnapshot() {
+  const url = localStorage.getItem('supa_url');
+  const key = localStorage.getItem('supa_key');
+  if (!url || !key) return null;
+  try {
+    const res = await fetch(`${url}/rest/v1/market_snapshots?select=*&order=created_at.desc&limit=1`, {
+      headers: { 'apikey': key, 'Authorization': `Bearer ${key}` }
+    });
+    if (!res.ok) { console.error('Supabase fetch failed:', res.status); return null; }
+    const rows = await res.json();
+    if (!rows || rows.length === 0) return null;
+    return rows[0];
+  } catch (err) {
+    console.error('Supabase fetch error:', err);
+    return null;
+  }
+}
+
+function applyLiveSnapshot(snap) {
+  if (!overrides.us2y) inputs.us2y.value = snap.us_2y;
+  if (!overrides.jgb2y) inputs.jgb2y.value = snap.jgb_2y;
+  if (!overrides.vix) inputs.vix.value = snap.vix;
+  if (!overrides.pos && snap.positioning_pct != null) inputs.pos.value = snap.positioning_pct;
+  if (!overrides.oil) inputs.oil.value = snap.oil_wti;
+  if (mode === 'live') px = parseFloat(snap.usdjpy_spot);
+  lastLiveUpdate = new Date(snap.created_at);
+  updateLabels();
+  updateStatusLine();
+}
+
+function startLivePolling() {
+  fetchLiveSnapshot().then(snap => { if (snap) applyLiveSnapshot(snap); });
+  livePollTimer = setInterval(() => {
+    fetchLiveSnapshot().then(snap => { if (snap) applyLiveSnapshot(snap); });
+  }, 10000);
+}
+
+function stopLivePolling() {
+  if (livePollTimer) clearInterval(livePollTimer);
+  livePollTimer = null;
+}
+
+function updateStatusLine() {
+  const el = $('status-line');
+  if (mode === 'sim') { el.textContent = ''; el.classList.remove('stale'); return; }
+  if (!lastLiveUpdate) { el.textContent = 'no data yet'; el.classList.add('stale'); return; }
+  const mins = Math.floor((Date.now() - lastLiveUpdate.getTime()) / 60000);
+  el.textContent = mins === 0 ? 'just now' : `${mins}m ago`;
+  el.classList.toggle('stale', mins > 15);
+}
+
+setInterval(updateStatusLine, 30000);
+
+function updateLabels() {
+  $('us2y-val').textContent = (+inputs.us2y.value).toFixed(2) + '%';
+  $('jgb2y-val').textContent = (+inputs.jgb2y.value).toFixed(2) + '%';
+  $('vix-val').textContent = Math.round(inputs.vix.value);
+  const p = +inputs.pos.value;
+  $('pos-val').textContent = p < 25 ? 'light' : p < 55 ? 'moderate' : p < 80 ? 'crowded' : 'extreme';
+  $('oil-val').textContent = '$' + Math.round(inputs.oil.value);
+  $('fix-val').textContent = inputs.fix.value === '1' ? 'on' : 'off';
+}
+Object.values(inputs).forEach(i => i.addEventListener('input', updateLabels));
+updateLabels();
+
+function shock(type) {
+  if (mode === 'live' && type !== 'reset') return;
+  if (type === 'hot_cpi') { shockImpulse = 1.2; shockBias = 1; }
+  else if (type === 'boj_hike') { shockImpulse = 2.0; shockBias = -1; inputs.jgb2y.value = Math.min(3, +inputs.jgb2y.value + 0.25); }
+  else if (type === 'mof') { shockImpulse = 2.5; shockBias = -1; }
+  else if (type === 'risk_off') { shockImpulse = 3.0; shockBias = -1; inputs.vix.value = Math.min(50, +inputs.vix.value + 15); }
+  else if (type === 'dovish_fed') { shockImpulse = 1.5; shockBias = -1; inputs.us2y.value = Math.max(2, +inputs.us2y.value - 0.20); }
+  updateLabels();
+}
+
+function reset() {
+  inputs.us2y.value = 4.5; inputs.jgb2y.value = 0.8; inputs.vix.value = 14;
+  inputs.pos.value = 50; inputs.oil.value = 78; inputs.fix.value = 1;
+  px = 150; for (let i=0;i<N;i++){ pxHist[i]=150; fvHist[i]=150; }
+  shockImpulse = 0; shockBias = 0;
+  updateLabels();
+}
+
+function step() {
+  const us2y = +inputs.us2y.value, jgb2y = +inputs.jgb2y.value;
+  const vix = +inputs.vix.value, pos = +inputs.pos.value, oil = +inputs.oil.value;
+  const fixOn = inputs.fix.value === '1';
+  const diff = us2y - jgb2y;
+  const fv = 142 + diff * 3.2 + (oil - 78) * 0.04;
+
+  if (mode === 'sim') {
+    const pull = (fv - px) * 0.025;
+    const volAmp = 0.02 + (vix - 14) * 0.008;
+    const noise = (Math.random() - 0.5) * volAmp;
+    let fixDip = 0;
+    if (fixOn && (tick % 60) > 55 && (tick % 60) < 60) fixDip = -0.04;
+    let snap = 0;
+    if (pos > 70 && (fv - px) < -0.5) snap = (fv - px) * 0.03 * (pos - 70) / 30;
+    if (vix > 30 && pos > 60) snap += -0.05 * ((vix - 30) / 20) * ((pos - 60) / 40);
+    let shockDelta = 0;
+    if (Math.abs(shockImpulse) > 0.01) {
+      shockDelta = shockImpulse * shockBias * 0.12;
+      shockImpulse *= 0.88;
+    }
+    px += pull + noise + fixDip + snap + shockDelta;
+  }
+
+  pxHist.shift(); pxHist.push(px);
+  fvHist.shift(); fvHist.push(fv);
+  tick++;
+
+  const minV = Math.min(...pxHist, ...fvHist) - 0.2;
+  const maxV = Math.max(...pxHist, ...fvHist) + 0.2;
+  const range = Math.max(maxV - minV, 1);
+  const toY = v => H - ((v - minV) / range) * (H - 2*PAD) - PAD;
+  let pxPts = '', fvPts = '';
+  for (let i=0;i<N;i++) {
+    const x = (i / (N-1)) * W;
+    pxPts += x.toFixed(1) + ',' + toY(pxHist[i]).toFixed(1) + ' ';
+    fvPts += x.toFixed(1) + ',' + toY(fvHist[i]).toFixed(1) + ' ';
+  }
+  $('px-line').setAttribute('points', pxPts);
+  $('fv-line').setAttribute('points', fvPts);
+  $('px-dot').setAttribute('cx', W);
+  $('px-dot').setAttribute('cy', toY(px));
+
+  const divergence = px - fv;
+  const absD = Math.abs(divergence);
+  $('spot').textContent = px.toFixed(2);
+  const prev = pxHist[N-2];
+  const delta = px - prev;
+  $('spot-sub').textContent = 'tick: ' + (delta >= 0 ? '+' : '') + delta.toFixed(3);
+  $('fv').textContent = fv.toFixed(2);
+  $('fv-sub').textContent = 'diff: ' + (diff >= 0 ? '+' : '') + diff.toFixed(2) + '%';
+  $('div').textContent = (divergence >= 0 ? '+' : '') + divergence.toFixed(2);
+
+  let stateText, pxColor;
+  if (absD < 0.4) { stateText = 'at equilibrium'; pxColor = '#3b82f6'; }
+  else if (absD < 1.2) { stateText = divergence > 0 ? 'mildly rich' : 'mildly cheap'; pxColor = '#f59e0b'; }
+  else { stateText = divergence > 0 ? 'overextended, fade risk' : 'undervalued, snap risk'; pxColor = '#ef4444'; }
+  $('div-sub').textContent = stateText;
+  $('spot').style.color = pxColor;
+  $('div').style.color = pxColor;
+  $('px-line').setAttribute('stroke', pxColor);
+  $('px-dot').setAttribute('fill', pxColor);
+  $('leg-px').style.background = pxColor;
+
+  const tensionPct = Math.min(absD / 2.5, 1) * 50;
+  const fill = $('tension-fill');
+  fill.style.height = tensionPct + '%';
+  fill.style.background = absD < 0.4 ? '#3b82f6' : absD < 1.2 ? '#f59e0b' : '#ef4444';
+  if (divergence > 0) { fill.style.bottom = '50%'; fill.style.top = 'auto'; }
+  else { fill.style.top = '50%'; fill.style.bottom = 'auto'; }
+
+  const crowded = pos > 70;
+  let regime, pillBg, pillFg, sev;
+  if (vix > 30 && crowded) { regime = 'carry unwind primed'; sev = 'unstable'; pillBg = '#7f1d1d'; pillFg = '#fca5a5'; }
+  else if (absD > 1.2) { regime = 'mean reversion setup'; sev = 'stretched'; pillBg = '#78350f'; pillFg = '#fcd34d'; }
+  else if (diff > 3 && vix < 18 && !crowded) { regime = 'carry accumulation'; sev = 'stable'; pillBg = '#14532d'; pillFg = '#86efac'; }
+  else if (diff < 1) { regime = 'narrow diff, low conviction'; sev = 'stable'; pillBg = '#262626'; pillFg = '#a3a3a3'; }
+  else { regime = 'neutral grind'; sev = 'stable'; pillBg = '#1e3a8a'; pillFg = '#93c5fd'; }
+  $('regime-label').textContent = 'Regime: ' + regime;
+  $('regime-pill').textContent = sev;
+  $('regime-pill').style.background = pillBg;
+  $('regime-pill').style.color = pillFg;
+
+  requestAnimationFrame(step);
+}
+requestAnimationFrame(step);
+</script>
+</body>
+</html>
