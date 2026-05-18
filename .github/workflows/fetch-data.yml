@@ -1,1 +1,27 @@
+name: Fetch USD/JPY data
+
+on:
+  schedule:
+    # Every 15 minutes (GitHub Actions cron minimum interval reliably is 5 min,
+    # but 15 keeps usage well under free tier limits)
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}  # allow manual run from the Actions tab
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run fetcher
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python fetch_data.py
 
