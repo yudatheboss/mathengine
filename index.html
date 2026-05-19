@@ -186,47 +186,29 @@
 </div>
 
 <script>
-// ============================================================
-// CONSTANTS
-// ============================================================
 const N = 200, W = 800, H = 280, PAD = 16;
-const FV_INTERCEPT = 142;
-const FV_RATE_COEF = 3.2;
-const FV_OIL_COEF = 0.04;
-const FV_OIL_BASE = 78;
+const FV_INTERCEPT = 142, FV_RATE_COEF = 3.2, FV_OIL_COEF = 0.04, FV_OIL_BASE = 78;
 
-// ============================================================
-// STATE
-// ============================================================
 let px = 150;
 const pxHist = new Array(N).fill(150);
 const fvHist = new Array(N).fill(150);
 let tick = 0, shockImpulse = 0, shockBias = 0;
 
 let mode = 'sim';
-let livePollTimer = null;
-let lastLiveUpdate = null;
+let supaPollTimer = null;
+let spotPollTimer = null;
+let lastSpotUpdate = null;
 const overrides = { us2y: false, jgb2y: false, vix: false, pos: false, oil: false };
 
-// Store the raw history rows from Supabase so we can recompute FV when user overrides
-let liveHistoryRows = [];
+let liveSpot = null;
 
-// ============================================================
-// DOM SHORTCUTS
-// ============================================================
 const $ = id => document.getElementById(id);
 const inputs = { us2y: $('us2y'), jgb2y: $('jgb2y'), vix: $('vix'), pos: $('pos'), oil: $('oil'), fix: $('fix') };
 
-// ============================================================
-// FAIR VALUE MATH
-// ============================================================
 function computeFV(us2y, jgb2y, oil) {
   return FV_INTERCEPT + (us2y - jgb2y) * FV_RATE_COEF + (oil - FV_OIL_BASE) * FV_OIL_COEF;
 }
 
-// ============================================================
-// MODE TOGGLE
-// ============================================================
 function setMode(newMode) {
   mode = newMode;
   $('sim-btn').classList.toggle('active', mode === 'sim');
@@ -234,7 +216,7 @@ function setMode(newMode) {
   document.body.classList.toggle('live-mode', mode === 'live');
   $('mode-subtitle').textContent = mode === 'sim'
     ? 'Simulation mode — sliders drive the math'
-    : 'Live mode — real data from Supabase, override any slider for what-if';
+    : 'Live mode — real USD/JPY ticking, real fair value baseline';
   Object.keys(inputs).forEach(k => {
     if (k === 'fix') return;
     if (mode === 'live') inputs[k].disabled = !overrides[k];
@@ -244,11 +226,9 @@ function setMode(newMode) {
     if (b.textContent === 'Reset') return;
     b.disabled = mode === 'live';
   });
-  if (mode === 'live') {
-    startLivePolling();
-  } else {
-    stopLivePolling();
-    // Reset chart to sim baseline when leaving live mode
+  if (mode === 'live') startLive();
+  else {
+    stopLive();
     px = 150;
     for (let i = 0; i < N; i++) { pxHist[i] = 150; fvHist[i] = 150; }
   }
@@ -258,9 +238,6 @@ function setMode(newMode) {
 $('sim-btn').onclick = () => setMode('sim');
 $('live-btn').onclick = () => setMode('live');
 
-// ============================================================
-// LOCK / OVERRIDE BUTTONS
-// ============================================================
 document.querySelectorAll('.lock-btn').forEach(btn => {
   btn.onclick = (e) => {
     e.preventDefault();
@@ -275,20 +252,11 @@ document.querySelectorAll('.lock-btn').forEach(btn => {
       tag.className = 'override-tag';
       tag.textContent = 'OVERRIDE';
       head.appendChild(tag);
-    } else if (!overrides[key] && tag) {
-      tag.remove();
-    }
-    if (mode === 'live') {
-      inputs[key].disabled = !overrides[key];
-      // If we have live history, recompute FV line using the new override
-      rebuildLiveHistory();
-    }
+    } else if (!overrides[key] && tag) tag.remove();
+    if (mode === 'live') inputs[key].disabled = !overrides[key];
   };
 });
 
-// ============================================================
-// SUPABASE CONFIG UI
-// ============================================================
 function toggleConfig() {
   const body = $('config-body');
   body.style.display = body.style.display === 'none' ? 'block' : 'none';
@@ -297,21 +265,17 @@ function toggleConfig() {
 function saveSupabaseConfig() {
   const url = $('supa-url').value.trim();
   const key = $('supa-key').value.trim();
-  if (!url || !key) {
-    $('config-status').textContent = 'Both fields required';
-    $('config-status').style.color = '#ef4444';
-    return;
-  }
+  if (!url || !key) { $('config-status').textContent = 'Both fields required'; $('config-status').style.color = '#ef4444'; return; }
   localStorage.setItem('supa_url', url);
   localStorage.setItem('supa_key', key);
-  $('config-status').textContent = 'Saved. Testing connection...';
+  $('config-status').textContent = 'Saved. Testing...';
   $('config-status').style.color = '#a3a3a3';
-  fetchLiveSnapshot().then(data => {
+  fetchSupabaseLatest().then(data => {
     if (data) {
-      $('config-status').textContent = `Connected. Loaded ${data._history.length} snapshot(s).`;
+      $('config-status').textContent = 'Connected.';
       $('config-status').style.color = '#22c55e';
     } else {
-      $('config-status').textContent = 'Connection failed. Check URL and key.';
+      $('config-status').textContent = 'Connection failed.';
       $('config-status').style.color = '#ef4444';
     }
   });
@@ -320,128 +284,111 @@ function saveSupabaseConfig() {
 if (localStorage.getItem('supa_url')) $('supa-url').value = localStorage.getItem('supa_url');
 if (localStorage.getItem('supa_key')) $('supa-key').value = localStorage.getItem('supa_key');
 
-// ============================================================
-// LIVE DATA FETCH (with history)
-// ============================================================
-async function fetchLiveSnapshot() {
+async function fetchSupabaseLatest() {
   const url = localStorage.getItem('supa_url');
   const key = localStorage.getItem('supa_key');
   if (!url || !key) return null;
   try {
-    // Get the last 200 snapshots so we have rich history
-    const res = await fetch(`${url}/rest/v1/market_snapshots?select=*&order=created_at.desc&limit=200`, {
+    const res = await fetch(`${url}/rest/v1/market_snapshots?select=*&order=created_at.desc&limit=1`, {
       headers: { 'apikey': key, 'Authorization': `Bearer ${key}` }
     });
-    if (!res.ok) {
-      console.error('Supabase fetch failed:', res.status);
-      return null;
-    }
+    if (!res.ok) { console.error('Supabase fetch failed:', res.status); return null; }
     const rows = await res.json();
     if (!rows || rows.length === 0) return null;
-    // Reverse so oldest is first
-    rows.reverse();
-    const latest = rows[rows.length - 1];
-    latest._history = rows;
-    return latest;
+    return rows[0];
   } catch (err) {
     console.error('Supabase fetch error:', err);
     return null;
   }
 }
 
-function applyLiveSnapshot(snap) {
-  // Push live values into sliders, but respect overrides
+function applySupabaseLatest(snap) {
   if (!overrides.us2y) inputs.us2y.value = snap.us_2y;
   if (!overrides.jgb2y) inputs.jgb2y.value = snap.jgb_2y;
   if (!overrides.vix) inputs.vix.value = snap.vix;
   if (!overrides.pos && snap.positioning_pct != null) inputs.pos.value = snap.positioning_pct;
   if (!overrides.oil) inputs.oil.value = snap.oil_wti;
-
-  // Stash full history for FV recompute on override changes
-  liveHistoryRows = snap._history || [snap];
-
-  // Build chart from real history
-  rebuildLiveHistory();
-
-  // Latest spot
-  px = parseFloat(snap.usdjpy_spot);
-  lastLiveUpdate = new Date(snap.created_at);
+  // Use the Supabase spot as a fallback if Yahoo hasn't loaded yet
+  if (liveSpot == null && snap.usdjpy_spot != null) {
+    liveSpot = parseFloat(snap.usdjpy_spot);
+    px = liveSpot;
+    for (let i = 0; i < N; i++) { pxHist[i] = px; fvHist[i] = computeFV(+inputs.us2y.value, +inputs.jgb2y.value, +inputs.oil.value); }
+  }
   updateLabels();
-  updateStatusLine();
 }
 
-function rebuildLiveHistory() {
-  if (mode !== 'live' || liveHistoryRows.length === 0) return;
+// Fetch USD/JPY via Yahoo Finance through a CORS proxy.
+// Falls back through multiple proxies if one fails.
+const CORS_PROXIES = [
+  'https://corsproxy.io/?',
+  'https://api.allorigins.win/raw?url=',
+  'https://api.codetabs.com/v1/proxy?quest='
+];
+let activeProxyIdx = 0;
 
-  // Get current slider values (which may include overrides)
-  const ovUs2y = overrides.us2y ? +inputs.us2y.value : null;
-  const ovJgb2y = overrides.jgb2y ? +inputs.jgb2y.value : null;
-  const ovOil = overrides.oil ? +inputs.oil.value : null;
-
-  // Use most recent values to fill any padding
-  const newest = liveHistoryRows[liveHistoryRows.length - 1];
-  const newestPx = parseFloat(newest.usdjpy_spot);
-  const newestFv = computeFV(
-    ovUs2y != null ? ovUs2y : parseFloat(newest.us_2y),
-    ovJgb2y != null ? ovJgb2y : parseFloat(newest.jgb_2y),
-    ovOil != null ? ovOil : parseFloat(newest.oil_wti)
-  );
-
-  // Pre-fill with newest values
-  for (let i = 0; i < N; i++) {
-    pxHist[i] = newestPx;
-    fvHist[i] = newestFv;
+async function fetchLiveSpot() {
+  const yahooUrl = 'https://query1.finance.yahoo.com/v8/finance/chart/JPY=X?interval=1m&range=1d';
+  for (let attempt = 0; attempt < CORS_PROXIES.length; attempt++) {
+    const proxyIdx = (activeProxyIdx + attempt) % CORS_PROXIES.length;
+    const proxy = CORS_PROXIES[proxyIdx];
+    try {
+      const url = proxy + encodeURIComponent(yahooUrl);
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const result = data && data.chart && data.chart.result && data.chart.result[0];
+      if (!result) continue;
+      const meta = result.meta;
+      const price = meta && (meta.regularMarketPrice || meta.previousClose);
+      if (price) {
+        activeProxyIdx = proxyIdx;
+        return parseFloat(price);
+      }
+    } catch (err) {
+      console.warn('Proxy failed:', proxy, err.message);
+    }
   }
+  return null;
+}
 
-  // Overlay real history at the end of the arrays (rightmost = newest)
-  const histLen = Math.min(liveHistoryRows.length, N);
-  const startIdx = N - histLen;
-  for (let i = 0; i < histLen; i++) {
-    const row = liveHistoryRows[liveHistoryRows.length - histLen + i];
-    pxHist[startIdx + i] = parseFloat(row.usdjpy_spot);
-    fvHist[startIdx + i] = computeFV(
-      ovUs2y != null ? ovUs2y : parseFloat(row.us_2y),
-      ovJgb2y != null ? ovJgb2y : parseFloat(row.jgb_2y),
-      ovOil != null ? ovOil : parseFloat(row.oil_wti)
-    );
+async function tickLiveSpot() {
+  const spot = await fetchLiveSpot();
+  if (spot != null) {
+    liveSpot = spot;
+    lastSpotUpdate = new Date();
+    updateStatusLine();
   }
 }
 
-function startLivePolling() {
-  fetchLiveSnapshot().then(snap => { if (snap) applyLiveSnapshot(snap); });
-  livePollTimer = setInterval(() => {
-    fetchLiveSnapshot().then(snap => { if (snap) applyLiveSnapshot(snap); });
-  }, 30000);  // poll every 30s (data only changes every 15 min anyway)
+function startLive() {
+  fetchSupabaseLatest().then(snap => { if (snap) applySupabaseLatest(snap); });
+  tickLiveSpot();
+  supaPollTimer = setInterval(() => {
+    fetchSupabaseLatest().then(snap => { if (snap) applySupabaseLatest(snap); });
+  }, 60000);
+  spotPollTimer = setInterval(tickLiveSpot, 5000);
 }
 
-function stopLivePolling() {
-  if (livePollTimer) clearInterval(livePollTimer);
-  livePollTimer = null;
-  liveHistoryRows = [];
+function stopLive() {
+  if (supaPollTimer) clearInterval(supaPollTimer);
+  if (spotPollTimer) clearInterval(spotPollTimer);
+  supaPollTimer = null;
+  spotPollTimer = null;
+  liveSpot = null;
 }
 
 function updateStatusLine() {
   const el = $('status-line');
-  if (mode === 'sim') {
-    el.textContent = '';
-    el.classList.remove('stale');
-    return;
-  }
-  if (!lastLiveUpdate) {
-    el.textContent = 'no data yet';
-    el.classList.add('stale');
-    return;
-  }
-  const mins = Math.floor((Date.now() - lastLiveUpdate.getTime()) / 60000);
-  el.textContent = mins === 0 ? 'just now' : `${mins}m ago`;
-  el.classList.toggle('stale', mins > 30);
+  if (mode === 'sim') { el.textContent = ''; el.classList.remove('stale'); return; }
+  if (!lastSpotUpdate) { el.textContent = 'connecting...'; el.classList.add('stale'); return; }
+  const secs = Math.floor((Date.now() - lastSpotUpdate.getTime()) / 1000);
+  if (secs < 10) el.textContent = '● spot live';
+  else if (secs < 60) el.textContent = `spot ${secs}s ago`;
+  else el.textContent = `spot ${Math.floor(secs/60)}m ago`;
+  el.classList.toggle('stale', secs > 120);
 }
+setInterval(updateStatusLine, 5000);
 
-setInterval(updateStatusLine, 30000);
-
-// ============================================================
-// SLIDER LABEL UPDATES
-// ============================================================
 function updateLabels() {
   $('us2y-val').textContent = (+inputs.us2y.value).toFixed(2) + '%';
   $('jgb2y-val').textContent = (+inputs.jgb2y.value).toFixed(2) + '%';
@@ -451,21 +398,9 @@ function updateLabels() {
   $('oil-val').textContent = '$' + Math.round(inputs.oil.value);
   $('fix-val').textContent = inputs.fix.value === '1' ? 'on' : 'off';
 }
-
-// When the user moves an unlocked slider in live mode, recompute the FV line
-Object.entries(inputs).forEach(([key, el]) => {
-  el.addEventListener('input', () => {
-    updateLabels();
-    if (mode === 'live' && (key === 'us2y' || key === 'jgb2y' || key === 'oil')) {
-      rebuildLiveHistory();
-    }
-  });
-});
+Object.values(inputs).forEach(i => i.addEventListener('input', updateLabels));
 updateLabels();
 
-// ============================================================
-// SIM SHOCKS / RESET
-// ============================================================
 function shock(type) {
   if (mode === 'live') return;
   if (type === 'hot_cpi') { shockImpulse = 1.2; shockBias = 1; }
@@ -484,9 +419,6 @@ function reset() {
   updateLabels();
 }
 
-// ============================================================
-// RENDER LOOP
-// ============================================================
 function step() {
   const us2y = +inputs.us2y.value, jgb2y = +inputs.jgb2y.value;
   const vix = +inputs.vix.value, pos = +inputs.pos.value, oil = +inputs.oil.value;
@@ -495,7 +427,6 @@ function step() {
   const fv = computeFV(us2y, jgb2y, oil);
 
   if (mode === 'sim') {
-    // Sim mode: tick the simulation forward
     const pull = (fv - px) * 0.025;
     const volAmp = 0.02 + (vix - 14) * 0.008;
     const noise = (Math.random() - 0.5) * volAmp;
@@ -510,14 +441,19 @@ function step() {
       shockImpulse *= 0.88;
     }
     px += pull + noise + fixDip + snap + shockDelta;
-    pxHist.shift(); pxHist.push(px);
-    fvHist.shift(); fvHist.push(fv);
+  } else {
+    // Live: ease toward real spot every frame; tiny noise for breathing animation.
+    if (liveSpot != null) {
+      const gap = liveSpot - px;
+      px += gap * 0.06;
+      px += (Math.random() - 0.5) * 0.012;
+    }
   }
-  // In live mode, pxHist and fvHist are managed by rebuildLiveHistory().
-  // The render loop just redraws them.
+
+  pxHist.shift(); pxHist.push(px);
+  fvHist.shift(); fvHist.push(fv);
   tick++;
 
-  // ========== RENDER ==========
   const minV = Math.min(...pxHist, ...fvHist) - 0.2;
   const maxV = Math.max(...pxHist, ...fvHist) + 0.2;
   const range = Math.max(maxV - minV, 1);
