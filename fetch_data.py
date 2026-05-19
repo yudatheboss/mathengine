@@ -5,9 +5,9 @@ then writes a new row to Supabase.
 
 Run via GitHub Actions cron every 5 minutes.
 Requires environment variables:
-  FRED_API_KEY = (os.environ.get("FRED_API_KEY") or "").strip()
-  SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip().rstrip("/")
-  SUPABASE_SERVICE_KEY = (os.environ.get("SUPABASE_SERVICE_KEY") or "").strip()
+  FRED_API_KEY = os.environ.get("FRED_API_KEY") or "")
+  SUPABASE_URL = os.environ.get("SUPABASE_URL") or "")
+  SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
 """
 
 import os
