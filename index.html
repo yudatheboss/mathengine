@@ -186,20 +186,47 @@
 </div>
 
 <script>
+// ============================================================
+// CONSTANTS
+// ============================================================
 const N = 200, W = 800, H = 280, PAD = 16;
+const FV_INTERCEPT = 142;
+const FV_RATE_COEF = 3.2;
+const FV_OIL_COEF = 0.04;
+const FV_OIL_BASE = 78;
+
+// ============================================================
+// STATE
+// ============================================================
 let px = 150;
 const pxHist = new Array(N).fill(150);
 const fvHist = new Array(N).fill(150);
 let tick = 0, shockImpulse = 0, shockBias = 0;
-
-const $ = id => document.getElementById(id);
-const inputs = { us2y: $('us2y'), jgb2y: $('jgb2y'), vix: $('vix'), pos: $('pos'), oil: $('oil'), fix: $('fix') };
 
 let mode = 'sim';
 let livePollTimer = null;
 let lastLiveUpdate = null;
 const overrides = { us2y: false, jgb2y: false, vix: false, pos: false, oil: false };
 
+// Store the raw history rows from Supabase so we can recompute FV when user overrides
+let liveHistoryRows = [];
+
+// ============================================================
+// DOM SHORTCUTS
+// ============================================================
+const $ = id => document.getElementById(id);
+const inputs = { us2y: $('us2y'), jgb2y: $('jgb2y'), vix: $('vix'), pos: $('pos'), oil: $('oil'), fix: $('fix') };
+
+// ============================================================
+// FAIR VALUE MATH
+// ============================================================
+function computeFV(us2y, jgb2y, oil) {
+  return FV_INTERCEPT + (us2y - jgb2y) * FV_RATE_COEF + (oil - FV_OIL_BASE) * FV_OIL_COEF;
+}
+
+// ============================================================
+// MODE TOGGLE
+// ============================================================
 function setMode(newMode) {
   mode = newMode;
   $('sim-btn').classList.toggle('active', mode === 'sim');
@@ -207,7 +234,7 @@ function setMode(newMode) {
   document.body.classList.toggle('live-mode', mode === 'live');
   $('mode-subtitle').textContent = mode === 'sim'
     ? 'Simulation mode — sliders drive the math'
-    : 'Live mode — real values from Supabase, override individual sliders to test "what if"';
+    : 'Live mode — real data from Supabase, override any slider for what-if';
   Object.keys(inputs).forEach(k => {
     if (k === 'fix') return;
     if (mode === 'live') inputs[k].disabled = !overrides[k];
@@ -217,14 +244,23 @@ function setMode(newMode) {
     if (b.textContent === 'Reset') return;
     b.disabled = mode === 'live';
   });
-  if (mode === 'live') startLivePolling();
-  else stopLivePolling();
+  if (mode === 'live') {
+    startLivePolling();
+  } else {
+    stopLivePolling();
+    // Reset chart to sim baseline when leaving live mode
+    px = 150;
+    for (let i = 0; i < N; i++) { pxHist[i] = 150; fvHist[i] = 150; }
+  }
   updateStatusLine();
 }
 
 $('sim-btn').onclick = () => setMode('sim');
 $('live-btn').onclick = () => setMode('live');
 
+// ============================================================
+// LOCK / OVERRIDE BUTTONS
+// ============================================================
 document.querySelectorAll('.lock-btn').forEach(btn => {
   btn.onclick = (e) => {
     e.preventDefault();
@@ -242,10 +278,17 @@ document.querySelectorAll('.lock-btn').forEach(btn => {
     } else if (!overrides[key] && tag) {
       tag.remove();
     }
-    if (mode === 'live') inputs[key].disabled = !overrides[key];
+    if (mode === 'live') {
+      inputs[key].disabled = !overrides[key];
+      // If we have live history, recompute FV line using the new override
+      rebuildLiveHistory();
+    }
   };
 });
 
+// ============================================================
+// SUPABASE CONFIG UI
+// ============================================================
 function toggleConfig() {
   const body = $('config-body');
   body.style.display = body.style.display === 'none' ? 'block' : 'none';
@@ -254,14 +297,18 @@ function toggleConfig() {
 function saveSupabaseConfig() {
   const url = $('supa-url').value.trim();
   const key = $('supa-key').value.trim();
-  if (!url || !key) { $('config-status').textContent = 'Both fields required'; $('config-status').style.color = '#ef4444'; return; }
+  if (!url || !key) {
+    $('config-status').textContent = 'Both fields required';
+    $('config-status').style.color = '#ef4444';
+    return;
+  }
   localStorage.setItem('supa_url', url);
   localStorage.setItem('supa_key', key);
   $('config-status').textContent = 'Saved. Testing connection...';
   $('config-status').style.color = '#a3a3a3';
   fetchLiveSnapshot().then(data => {
     if (data) {
-      $('config-status').textContent = 'Connected. Latest snapshot loaded.';
+      $('config-status').textContent = `Connected. Loaded ${data._history.length} snapshot(s).`;
       $('config-status').style.color = '#22c55e';
     } else {
       $('config-status').textContent = 'Connection failed. Check URL and key.';
@@ -273,18 +320,29 @@ function saveSupabaseConfig() {
 if (localStorage.getItem('supa_url')) $('supa-url').value = localStorage.getItem('supa_url');
 if (localStorage.getItem('supa_key')) $('supa-key').value = localStorage.getItem('supa_key');
 
+// ============================================================
+// LIVE DATA FETCH (with history)
+// ============================================================
 async function fetchLiveSnapshot() {
   const url = localStorage.getItem('supa_url');
   const key = localStorage.getItem('supa_key');
   if (!url || !key) return null;
   try {
-    const res = await fetch(`${url}/rest/v1/market_snapshots?select=*&order=created_at.desc&limit=1`, {
+    // Get the last 200 snapshots so we have rich history
+    const res = await fetch(`${url}/rest/v1/market_snapshots?select=*&order=created_at.desc&limit=200`, {
       headers: { 'apikey': key, 'Authorization': `Bearer ${key}` }
     });
-    if (!res.ok) { console.error('Supabase fetch failed:', res.status); return null; }
+    if (!res.ok) {
+      console.error('Supabase fetch failed:', res.status);
+      return null;
+    }
     const rows = await res.json();
     if (!rows || rows.length === 0) return null;
-    return rows[0];
+    // Reverse so oldest is first
+    rows.reverse();
+    const latest = rows[rows.length - 1];
+    latest._history = rows;
+    return latest;
   } catch (err) {
     console.error('Supabase fetch error:', err);
     return null;
@@ -292,40 +350,98 @@ async function fetchLiveSnapshot() {
 }
 
 function applyLiveSnapshot(snap) {
+  // Push live values into sliders, but respect overrides
   if (!overrides.us2y) inputs.us2y.value = snap.us_2y;
   if (!overrides.jgb2y) inputs.jgb2y.value = snap.jgb_2y;
   if (!overrides.vix) inputs.vix.value = snap.vix;
   if (!overrides.pos && snap.positioning_pct != null) inputs.pos.value = snap.positioning_pct;
   if (!overrides.oil) inputs.oil.value = snap.oil_wti;
-  if (mode === 'live') px = parseFloat(snap.usdjpy_spot);
+
+  // Stash full history for FV recompute on override changes
+  liveHistoryRows = snap._history || [snap];
+
+  // Build chart from real history
+  rebuildLiveHistory();
+
+  // Latest spot
+  px = parseFloat(snap.usdjpy_spot);
   lastLiveUpdate = new Date(snap.created_at);
   updateLabels();
   updateStatusLine();
+}
+
+function rebuildLiveHistory() {
+  if (mode !== 'live' || liveHistoryRows.length === 0) return;
+
+  // Get current slider values (which may include overrides)
+  const ovUs2y = overrides.us2y ? +inputs.us2y.value : null;
+  const ovJgb2y = overrides.jgb2y ? +inputs.jgb2y.value : null;
+  const ovOil = overrides.oil ? +inputs.oil.value : null;
+
+  // Use most recent values to fill any padding
+  const newest = liveHistoryRows[liveHistoryRows.length - 1];
+  const newestPx = parseFloat(newest.usdjpy_spot);
+  const newestFv = computeFV(
+    ovUs2y != null ? ovUs2y : parseFloat(newest.us_2y),
+    ovJgb2y != null ? ovJgb2y : parseFloat(newest.jgb_2y),
+    ovOil != null ? ovOil : parseFloat(newest.oil_wti)
+  );
+
+  // Pre-fill with newest values
+  for (let i = 0; i < N; i++) {
+    pxHist[i] = newestPx;
+    fvHist[i] = newestFv;
+  }
+
+  // Overlay real history at the end of the arrays (rightmost = newest)
+  const histLen = Math.min(liveHistoryRows.length, N);
+  const startIdx = N - histLen;
+  for (let i = 0; i < histLen; i++) {
+    const row = liveHistoryRows[liveHistoryRows.length - histLen + i];
+    pxHist[startIdx + i] = parseFloat(row.usdjpy_spot);
+    fvHist[startIdx + i] = computeFV(
+      ovUs2y != null ? ovUs2y : parseFloat(row.us_2y),
+      ovJgb2y != null ? ovJgb2y : parseFloat(row.jgb_2y),
+      ovOil != null ? ovOil : parseFloat(row.oil_wti)
+    );
+  }
 }
 
 function startLivePolling() {
   fetchLiveSnapshot().then(snap => { if (snap) applyLiveSnapshot(snap); });
   livePollTimer = setInterval(() => {
     fetchLiveSnapshot().then(snap => { if (snap) applyLiveSnapshot(snap); });
-  }, 10000);
+  }, 30000);  // poll every 30s (data only changes every 15 min anyway)
 }
 
 function stopLivePolling() {
   if (livePollTimer) clearInterval(livePollTimer);
   livePollTimer = null;
+  liveHistoryRows = [];
 }
 
 function updateStatusLine() {
   const el = $('status-line');
-  if (mode === 'sim') { el.textContent = ''; el.classList.remove('stale'); return; }
-  if (!lastLiveUpdate) { el.textContent = 'no data yet'; el.classList.add('stale'); return; }
+  if (mode === 'sim') {
+    el.textContent = '';
+    el.classList.remove('stale');
+    return;
+  }
+  if (!lastLiveUpdate) {
+    el.textContent = 'no data yet';
+    el.classList.add('stale');
+    return;
+  }
   const mins = Math.floor((Date.now() - lastLiveUpdate.getTime()) / 60000);
   el.textContent = mins === 0 ? 'just now' : `${mins}m ago`;
-  el.classList.toggle('stale', mins > 15);
+  el.classList.toggle('stale', mins > 30);
 }
 
 setInterval(updateStatusLine, 30000);
 
+// ============================================================
+// SLIDER LABEL UPDATES
+// ============================================================
 function updateLabels() {
   $('us2y-val').textContent = (+inputs.us2y.value).toFixed(2) + '%';
   $('jgb2y-val').textContent = (+inputs.jgb2y.value).toFixed(2) + '%';
@@ -335,11 +451,23 @@ function updateLabels() {
   $('oil-val').textContent = '$' + Math.round(inputs.oil.value);
   $('fix-val').textContent = inputs.fix.value === '1' ? 'on' : 'off';
 }
-Object.values(inputs).forEach(i => i.addEventListener('input', updateLabels));
+
+// When the user moves an unlocked slider in live mode, recompute the FV line
+Object.entries(inputs).forEach(([key, el]) => {
+  el.addEventListener('input', () => {
+    updateLabels();
+    if (mode === 'live' && (key === 'us2y' || key === 'jgb2y' || key === 'oil')) {
+      rebuildLiveHistory();
+    }
+  });
+});
 updateLabels();
 
+// ============================================================
+// SIM SHOCKS / RESET
+// ============================================================
 function shock(type) {
-  if (mode === 'live' && type !== 'reset') return;
+  if (mode === 'live') return;
   if (type === 'hot_cpi') { shockImpulse = 1.2; shockBias = 1; }
   else if (type === 'boj_hike') { shockImpulse = 2.0; shockBias = -1; inputs.jgb2y.value = Math.min(3, +inputs.jgb2y.value + 0.25); }
   else if (type === 'mof') { shockImpulse = 2.5; shockBias = -1; }
@@ -356,14 +484,18 @@ function reset() {
   updateLabels();
 }
 
+// ============================================================
+// RENDER LOOP
+// ============================================================
 function step() {
   const us2y = +inputs.us2y.value, jgb2y = +inputs.jgb2y.value;
   const vix = +inputs.vix.value, pos = +inputs.pos.value, oil = +inputs.oil.value;
   const fixOn = inputs.fix.value === '1';
   const diff = us2y - jgb2y;
-  const fv = 142 + diff * 3.2 + (oil - 78) * 0.04;
+  const fv = computeFV(us2y, jgb2y, oil);
 
   if (mode === 'sim') {
+    // Sim mode: tick the simulation forward
     const pull = (fv - px) * 0.025;
     const volAmp = 0.02 + (vix - 14) * 0.008;
     const noise = (Math.random() - 0.5) * volAmp;
@@ -378,12 +510,14 @@ function step() {
       shockImpulse *= 0.88;
     }
     px += pull + noise + fixDip + snap + shockDelta;
+    pxHist.shift(); pxHist.push(px);
+    fvHist.shift(); fvHist.push(fv);
   }
-
-  pxHist.shift(); pxHist.push(px);
-  fvHist.shift(); fvHist.push(fv);
+  // In live mode, pxHist and fvHist are managed by rebuildLiveHistory().
+  // The render loop just redraws them.
   tick++;
 
+  // ========== RENDER ==========
   const minV = Math.min(...pxHist, ...fvHist) - 0.2;
   const maxV = Math.max(...pxHist, ...fvHist) + 0.2;
   const range = Math.max(maxV - minV, 1);
